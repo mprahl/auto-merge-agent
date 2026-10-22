@@ -85,7 +85,8 @@ class GitHubForge:
             },
         )
         if response.status_code >= 400:
-            raise GitHubError(f"GitHub {method} {path} returned {response.status_code}: {response.text[:300]}", response.status_code)
+            # Keep response bodies out of errors/logs; they may contain repository content.
+            raise GitHubError(f"GitHub {method} {path} returned {response.status_code}", response.status_code)
         if accept == "application/vnd.github.diff":
             return response.text
         return response.json() if response.content else None

@@ -2,14 +2,185 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   validate:
+    name: Python 3.12
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+          enable-cache: true
       - run: uv sync --extra test --locked
       - run: uv run python scripts/generate_schemas.py --check
       - run: uv run auto-merge-agent validate-config
-      - run: uv run pytest -q
+      - run: uv run python scripts/check_rule_order.py
+      - run: uv run pytest -q --junitxml=build/test-results.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: tests-python-3.12
+          path: build/test-results.xml
+  manifests:
+    name: Manifests and workflow validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - name: Install pinned validators
+        run: |
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.6.0
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - run: uv sync --extra test --locked
+      - run: actionlint
+      - run: uv run pytest -q tests/test_deployment.py
+      - name: Prepare and render both overlays
+        run: |
+          uv run python scripts/prepare_deployment.py \
+            --policy-root tests/fixtures/deployment --repository ci-owner/fixture \
+            --image auto-merge-agent:ci --output build/deploy
+          kustomize build build/deploy/overlays/kind > build/kind.yaml
+          kustomize build build/deploy/overlays/openshift > build/openshift.yaml
+      - name: Validate Kubernetes and OpenShift Route schemas
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://raw.githubusercontent.com/openshift/api/f9b2d1ae30ebf759bc287c38474b41f246852cae/route/v1/zz_generated.crd-manifests/routes-Default.crd.yaml \
+            -o build/route-crd.yaml
+          uv run python scripts/ci/route_schema.py build/route-crd.yaml build/schemas/route.json
+          kubeconform -strict -summary -kubernetes-version 1.35.0 \
+            -schema-location default -schema-location 'build/schemas/{{.ResourceKind}}.json' \
+            build/kind.yaml build/openshift.yaml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rendered-manifests
+          path: |
+            build/kind.yaml
+            build/openshift.yaml
+  image:
+    name: Build runtime image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Containerfile
+          tags: auto-merge-agent:ci
+          outputs: type=docker,dest=${{ runner.temp }}/auto-merge-agent.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Check image entrypoint and policy isolation
+        run: |
+          docker load --input "$RUNNER_TEMP/auto-merge-agent.tar"
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            --user 1000780000:0 --cap-drop ALL --security-opt no-new-privileges \
+            auto-merge-agent:ci --help
+          docker run --rm --network none --read-only --entrypoint python auto-merge-agent:ci -c \
+            'from pathlib import Path; assert not Path("/app/configs").exists(); assert not Path("/app/.git").exists()'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-image
+          path: ${{ runner.temp }}/auto-merge-agent.tar
+          compression-level: 0
+          retention-days: 1
+  kind:
+    name: kind Kubernetes 1.35.0
+    needs: [image, manifests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - name: Install pinned cluster tools
+        env:
+          KUBERNETES_VERSION: "1.35.0"
+        run: |
+          go install sigs.k8s.io/kind@v0.31.0
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.6.0
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://dl.k8s.io/release/v$KUBERNETES_VERSION/bin/linux/amd64/kubectl" -o "$RUNNER_TEMP/kubectl"
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://dl.k8s.io/release/v$KUBERNETES_VERSION/bin/linux/amd64/kubectl.sha256" -o "$RUNNER_TEMP/kubectl.sha256"
+          printf '%s  %s\n' "$(cat "$RUNNER_TEMP/kubectl.sha256")" "$RUNNER_TEMP/kubectl" | sha256sum --check
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$RUNNER_TEMP/kubectl" "$HOME/.local/bin/kubectl"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-image
+          path: ${{ runner.temp }}/image
+      - name: Create cluster and load image
+        env:
+          NODE_IMAGE: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
+        run: |
+          kind create cluster --name automerge --image "$NODE_IMAGE" --wait 120s
+          kind load image-archive "$RUNNER_TEMP/image/auto-merge-agent.tar" --name automerge
+      - run: uv sync --locked
+      - name: Exercise deployment lifecycle and webhook security
+        run: uv run python scripts/smoke_deployment.py auto-merge-agent:ci
+      - name: Collect diagnostics
+        if: always()
+        run: bash scripts/ci/diagnostics.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: kind-diagnostics-1.35.0
+          path: build/diagnostics
+      - name: Delete cluster
+        if: always()
+        run: kind delete cluster --name automerge
+  required:
+    name: CI complete
+    if: always()
+    needs: [validate, manifests, image, kind]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every job to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          assert all(job["result"] == "success" for job in results.values()), results
+          PY

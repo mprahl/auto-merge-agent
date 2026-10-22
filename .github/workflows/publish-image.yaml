@@ -1,0 +1,63 @@
+name: Publish image
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Containerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
+      - src/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: quay-publish-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  ci:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yaml
+  publish:
+    needs: ci
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      QUAY_IMAGE: quay.io/opendatahub/auto-merge-agent
+      QUAY_ROBOT_USER: opendatahub+auto-merge-agent-publisher
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-image
+          path: ${{ runner.temp }}/image
+      - name: Exchange GitHub OIDC token for a short-lived Quay robot token
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$(
+            curl --fail --silent --show-error \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=quay" | jq --raw-output '.value'
+          )"
+          test -n "$oidc_token" && test "$oidc_token" != null
+          echo "::add-mask::$oidc_token"
+          quay_token="$(
+            curl --fail --silent --show-error \
+              --user "$QUAY_ROBOT_USER:$oidc_token" \
+              https://quay.io/oauth2/federation/robot/token | jq --raw-output '.token'
+          )"
+          test -n "$quay_token" && test "$quay_token" != null
+          echo "::add-mask::$quay_token"
+          printf '%s' "$quay_token" | docker login quay.io --username "$QUAY_ROBOT_USER" --password-stdin
+      - name: Publish the exact image tested by CI
+        run: |
+          docker load --input "$RUNNER_TEMP/image/auto-merge-agent.tar"
+          docker tag auto-merge-agent:ci "$QUAY_IMAGE:sha-$GITHUB_SHA"
+          docker push "$QUAY_IMAGE:sha-$GITHUB_SHA"
+          printf 'Published %s:sha-%s\n' "$QUAY_IMAGE" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

@@ -2,6 +2,8 @@
 
 The Git repository contains the agent code and policies. Run it as a GitHub App receiving webhooks or as a process that polls with a GitHub token. A container image is optional.
 
+For a cluster deployment, see [OpenShift and Kubernetes deployment](openshift.md).
+
 ## Run with a GitHub token
 
 Create repository configs and validate them with `uv run auto-merge-agent validate-config`. The token's repository access and the enabled configs together determine which repositories are scanned. For a fine-grained personal access token, grant **Pull requests: read and write**, **Contents: read and write** for merging, **Checks: read**, **Commit statuses: read and write**, and **Issues: read and write** for comments. Shadow mode only reads. A classic token needs access to those repositories and suitable `repo` scope. [GitHub documents commit status permissions](https://docs.github.com/en/rest/commits/statuses) and [check-run writes are limited to GitHub Apps](https://docs.github.com/en/rest/checks/runs), so token mode publishes an `automerge/policy` commit status instead of a check run.

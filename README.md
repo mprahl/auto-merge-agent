@@ -198,6 +198,9 @@ The service accepts webhooks at `/webhook`, exposes `/health`, and scans enabled
 
 See [deployment](docs/deployment.md) for permissions, events, environment variables, local webhook forwarding, and rollout steps. See [architecture](docs/architecture.md) for the evaluation flow, extension points, and MLflow tracing.
 
+For OpenShift, use the [container and Kustomize deployment guide](docs/openshift.md).
+CI validates both overlays and runs deployment lifecycle tests in kind without real GitHub or Quay credentials.
+
 ## Project scope
 
 The current implementation supports GitHub and CodeRabbit. GitLab and additional reviewer integrations are extension points. The webhook service uses one worker and an in-memory queue with retries; pending events do not survive a restart. Polling retries failed PRs on the next scan. GitHub branch rules still decide which merges are permitted.

@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auto-merge-agent
+spec:
+  template:
+    spec:
+      securityContext:
+        # Exercise an arbitrary UID, distinct from the image's default user.
+        runAsUser: 1000780000
+        runAsGroup: 0

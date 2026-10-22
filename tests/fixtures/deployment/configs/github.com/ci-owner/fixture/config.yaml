@@ -1,0 +1,3 @@
+schema_version: 1
+# No network calls or real repositories in the cluster smoke test.
+enabled: false

@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auto-merge-agent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: auto-merge-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: auto-merge-agent
+    spec:
+      serviceAccountName: auto-merge-agent
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: validate-config
+          image: auto-merge-agent:latest
+          args: ["--config-root", "/etc/auto-merge-agent", "validate-config"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/auto-merge-agent
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: agent
+          image: auto-merge-agent:latest
+          args: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: AUTOMERGE_CONFIG_ROOT
+              value: /etc/auto-merge-agent
+            - name: AUTOMERGE_ACTIVE
+              value: "false"
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: auto-merge-agent-github
+                  key: app-id
+            - name: GITHUB_APP_PRIVATE_KEY_FILE
+              value: /etc/github-app/private-key.pem
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: auto-merge-agent-github
+                  key: webhook-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: auto-merge-agent-openai
+                  key: api-key
+                  optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/auto-merge-agent
+              readOnly: true
+            - name: github-app
+              mountPath: /etc/github-app
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: policy
+          configMap:
+            name: auto-merge-agent-policy
+        - name: github-app
+          secret:
+            secretName: auto-merge-agent-github
+            defaultMode: 0444
+            items:
+              - key: private-key.pem
+                path: private-key.pem
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

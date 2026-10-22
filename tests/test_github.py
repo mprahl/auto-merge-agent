@@ -146,6 +146,23 @@ async def test_changed_head_rejects_merge():
 
 
 @pytest.mark.asyncio
+async def test_error_messages_exclude_response_bodies():
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(403, json={"message": "sensitive repository content"})))
+    forge = GitHubForge(token="test", api_url="https://api.github.test", client=client)
+    ref = PullRequestRef(owner="acme", repo="repo", number=12)
+    pr = PullRequestSnapshot(ref=ref, head_sha="a" * 40, base_sha="b" * 40,
+                             state="open", draft=False, title="Test", url="https://example.com", changed_files=1)
+    try:
+        with pytest.raises(GitHubError, match="returned 403") as exc:
+            await forge.merge(pr, "squash")
+        assert "sensitive repository content" not in str(exc.value)
+        assert exc.value.status_code == 403
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_missing_app_installation_has_actionable_error(monkeypatch):
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(404, json={"message": "Not Found"})))
     forge = GitHubForge(app_id="1", private_key="test", api_url="https://api.github.test", client=client)
